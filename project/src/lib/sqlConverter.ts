@@ -1,4 +1,11 @@
-import { ConversionResult } from '../types/sql';
+import { format } from 'sql-formatter';
+
+interface ConversionResult {
+  success: boolean;
+  sql?: string;
+  warnings?: string[];
+  errors?: string[];
+}
 
 export class SQLConverter {
   private warnings: string[] = [];
@@ -17,9 +24,6 @@ export class SQLConverter {
       sql = this.convertDistributeBy(sql);
       sql = this.convertComplexTypes(sql);
       sql = this.convertFileFormats(sql);
-      sql = this.convertBucketingAndSorting(sql);
-      sql = this.convertSkewHandling(sql);
-      sql = this.convertRecursiveCTE(sql);
       
       return {
         success: true,
@@ -36,59 +40,14 @@ export class SQLConverter {
   }
 
   private preprocessSQL(sql: string): string {
-    // Remove all SET commands with detailed patterns
-    const setPatterns = [
-      // Hive configuration settings
-      /SET\s+hive\.[^;]+;/gi,
-      // MapReduce settings
-      /SET\s+mapred\.[^;]+;/gi,
-      // Tez settings
-      /SET\s+tez\.[^;]+;/gi,
-      // Spark settings
-      /SET\s+spark\.[^;]+;/gi,
-      // Dynamic partition settings
-      /SET\s+hive\.exec\.dynamic\.partition[^;]+;/gi,
-      // Parallel execution settings
-      /SET\s+hive\.exec\.parallel[^;]+;/gi,
-      // Compression settings
-      /SET\s+hive\.exec\.compress\.[^;]+;/gi,
-      // Memory settings
-      /SET\s+mapreduce\.map\.memory\.[^;]+;/gi,
-      /SET\s+mapreduce\.reduce\.memory\.[^;]+;/gi,
-      // Join settings
-      /SET\s+hive\.auto\.convert\.join[^;]+;/gi,
-      // Bucketing settings
-      /SET\s+hive\.enforce\.bucketing[^;]+;/gi,
-      // Statistics settings
-      /SET\s+hive\.stats\.[^;]+;/gi,
-      // Optimization settings
-      /SET\s+hive\.optimize\.[^;]+;/gi,
-      // Any remaining SET commands
-      /SET\s+[^=;]+=\s*[^;]+;/gi
-    ];
-
-    // Apply each pattern and track removed settings
-    setPatterns.forEach(pattern => {
-      const matches = sql.match(pattern);
-      if (matches) {
-        matches.forEach(match => {
-          this.warnings.push(`Removed Hive setting: ${match.trim()}`);
-        });
-      }
-      sql = sql.replace(pattern, '');
-    });
+    // Remove SET statements
+    sql = sql.replace(/^SET\s+[^;]+;/gm, '');
     
     // Remove Hive hints
-    sql = sql.replace(/\/\*\+\s*(?:MAPJOIN|STREAMTABLE|BROADCAST|SKEWJOIN)\([^)]*\)\s*\*\//g, '');
+    sql = sql.replace(/\/\*\+\s*(?:MAPJOIN|STREAMTABLE|BROADCAST)\([^)]*\)\s*\*\//g, '');
     
-    // Clean up comments and whitespace
-    sql = sql
-      .replace(/--.*$/gm, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    return sql;
+    // Clean up whitespace
+    return sql.replace(/\s+/g, ' ').trim();
   }
 
   private convertCreateTable(sql: string): string {
@@ -129,42 +88,10 @@ export class SQLConverter {
       }
     });
 
-    // Remove ROW FORMAT clauses
+    // Remove storage clauses
     sql = sql.replace(/ROW\s+FORMAT\s+[^;]+/gi, '');
-    
-    // Remove LOCATION clauses
     sql = sql.replace(/LOCATION\s+\'[^\']+\'/gi, '');
-    
-    // Remove TBLPROPERTIES
     sql = sql.replace(/TBLPROPERTIES\s*\([^)]*\)/gi, '');
-
-    return sql;
-  }
-
-  private convertBucketingAndSorting(sql: string): string {
-    // Convert CLUSTERED BY to clustering keys
-    const clusterMatch = sql.match(/CLUSTERED\s+BY\s*\(([^)]+)\)/i);
-    if (clusterMatch) {
-      const columns = clusterMatch[1].split(',').map(col => col.trim());
-      this.warnings.push(`Converting CLUSTERED BY to Snowflake clustering keys`);
-      sql = sql.replace(
-        /CLUSTERED\s+BY\s*\([^)]+\)\s+INTO\s+\d+\s+BUCKETS/gi,
-        `CLUSTER BY (${columns.join(', ')})`
-      );
-    }
-
-    // Convert SORT BY to ORDER BY
-    sql = sql.replace(/SORT\s+BY/gi, 'ORDER BY');
-
-    return sql;
-  }
-
-  private convertSkewHandling(sql: string): string {
-    // Remove skew hints and settings
-    if (sql.match(/\/\*\+\s*SKEWJOIN/i)) {
-      this.warnings.push("Removing SKEWJOIN hint as Snowflake handles data skew automatically");
-      sql = sql.replace(/\/\*\+\s*SKEWJOIN\([^)]*\)\s*\*\//gi, '');
-    }
 
     return sql;
   }
@@ -188,51 +115,6 @@ export class SQLConverter {
       this.warnings.push("Converting DISTRIBUTE BY to ORDER BY");
       sql = sql.replace(/DISTRIBUTE\s+BY/gi, 'ORDER BY');
     }
-    return sql;
-  }
-
-  private convertRecursiveCTE(sql: string): string {
-    // Handle recursive CTEs
-    if (sql.match(/WITH\s+RECURSIVE/i)) {
-      this.warnings.push("Snowflake supports recursive CTEs with similar syntax");
-    }
-    return sql;
-  }
-
-  private convertLateralView(sql: string): string {
-    // Convert LATERAL VIEW EXPLODE to FLATTEN
-    if (sql.match(/LATERAL\s+VIEW\s+EXPLODE/i)) {
-      this.warnings.push("Converting LATERAL VIEW EXPLODE to Snowflake's FLATTEN");
-      sql = sql.replace(
-        /LATERAL\s+VIEW\s+(?:OUTER\s+)?EXPLODE\s*\(([^)]+)\)\s+(\w+)\s+AS\s+(\w+)/gi,
-        'CROSS JOIN TABLE(FLATTEN(input => $1)) AS $2($3)'
-      );
-    }
-    return sql;
-  }
-
-  private convertDataTypes(sql: string): string {
-    const typeMap: Record<string, string> = {
-      'STRING': 'VARCHAR',
-      'INT': 'NUMBER(38,0)',
-      'INTEGER': 'NUMBER(38,0)',
-      'BIGINT': 'NUMBER(38,0)',
-      'SMALLINT': 'NUMBER(5,0)',
-      'TINYINT': 'NUMBER(3,0)',
-      'DOUBLE': 'DOUBLE',
-      'FLOAT': 'FLOAT',
-      'BOOLEAN': 'BOOLEAN',
-      'BINARY': 'BINARY',
-      'TIMESTAMP': 'TIMESTAMP_NTZ',
-      'DATE': 'DATE',
-      'DECIMAL': 'NUMBER'
-    };
-
-    Object.entries(typeMap).forEach(([hiveType, snowType]) => {
-      const regex = new RegExp(`\\b${hiveType}\\b`, 'gi');
-      sql = sql.replace(regex, snowType);
-    });
-
     return sql;
   }
 
@@ -286,6 +168,43 @@ export class SQLConverter {
     return sql;
   }
 
+  private convertLateralView(sql: string): string {
+    // Convert LATERAL VIEW EXPLODE to FLATTEN
+    if (sql.match(/LATERAL\s+VIEW\s+EXPLODE/i)) {
+      this.warnings.push("Converting LATERAL VIEW EXPLODE to Snowflake's FLATTEN");
+      sql = sql.replace(
+        /LATERAL\s+VIEW\s+(?:OUTER\s+)?EXPLODE\s*\(([^)]+)\)\s+(\w+)\s+AS\s+(\w+)/gi,
+        'CROSS JOIN TABLE(FLATTEN(input => $1)) AS $2($3)'
+      );
+    }
+    return sql;
+  }
+
+  private convertDataTypes(sql: string): string {
+    const typeMap: Record<string, string> = {
+      'STRING': 'VARCHAR',
+      'INT': 'NUMBER(38,0)',
+      'INTEGER': 'NUMBER(38,0)',
+      'BIGINT': 'NUMBER(38,0)',
+      'SMALLINT': 'NUMBER(5,0)',
+      'TINYINT': 'NUMBER(3,0)',
+      'DOUBLE': 'DOUBLE',
+      'FLOAT': 'FLOAT',
+      'BOOLEAN': 'BOOLEAN',
+      'BINARY': 'BINARY',
+      'TIMESTAMP': 'TIMESTAMP_NTZ',
+      'DATE': 'DATE',
+      'DECIMAL': 'NUMBER'
+    };
+
+    Object.entries(typeMap).forEach(([hiveType, snowType]) => {
+      const regex = new RegExp(`\\b${hiveType}\\b`, 'gi');
+      sql = sql.replace(regex, snowType);
+    });
+
+    return sql;
+  }
+
   private formatSQL(sql: string): string {
     const keywords = [
       'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 
@@ -293,25 +212,33 @@ export class SQLConverter {
       'ON', 'AND', 'OR', 'IN', 'NOT', 'EXISTS', 'BETWEEN',
       'UNION', 'ALL', 'CREATE', 'TABLE', 'INSERT', 'INTO',
       'VALUES', 'UPDATE', 'DELETE', 'ALTER', 'DROP',
-      'CROSS JOIN', 'FLATTEN', 'ARRAY_AGG', 'DISTINCT'
+      'CROSS JOIN', 'FLATTEN', 'ARRAY_AGG', 'DISTINCT',
+      'FILE_FORMAT', 'CLUSTER BY', 'TIMESTAMP_NTZ', 'VARCHAR',
+      'NUMBER', 'DOUBLE', 'FLOAT', 'BOOLEAN', 'BINARY',
+      'ARRAY', 'OBJECT', 'PARSE_JSON', 'GET_PATH'
     ];
 
-    let formatted = sql;
-    
-    // Capitalize keywords
-    keywords.forEach(keyword => {
-      formatted = formatted.replace(
-        new RegExp(`\\b${keyword}\\b`, 'gi'),
-        keyword
-      );
-    });
+    try {
+      // First, capitalize keywords
+      let formattedSQL = sql;
+      keywords.forEach(keyword => {
+        formattedSQL = formattedSQL.replace(
+          new RegExp(`\\b${keyword}\\b`, 'gi'),
+          keyword
+        );
+      });
 
-    // Add newlines and indentation
-    formatted = formatted
-      .replace(/\b(FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT)\b/g, '\n$1')
-      .replace(/\b(LEFT|RIGHT|INNER|OUTER|CROSS)?\s*JOIN\b/g, '\n$&')
-      .replace(/,\s*([\w\d_]+)/g, ',\n  $1');
-
-    return formatted;
+      // Then use sql-formatter for proper formatting
+      return format(formattedSQL, {
+        language: 'sql',
+        keywordCase: 'upper',
+        indentStyle: 'standard',
+        linesBetweenQueries: 2
+      });
+    } catch (error) {
+      // Fallback to basic formatting if sql-formatter fails
+      console.warn('SQL formatter error:', error);
+      return formattedSQL;
+    }
   }
 }
