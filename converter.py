@@ -6,6 +6,7 @@ from sqlglot import exp, parse_one, parse
 from sqlglot.expressions import *
 from sqlglot.dialects import hive, snowflake
 from .exceptions import ConversionError
+from .table_mappings import get_table_info, get_snowflake_type, get_snowflake_table_name
 
 class HiveToSnowflakeConverter:
     def __init__(self):
@@ -18,14 +19,22 @@ class HiveToSnowflakeConverter:
             
             # Step 1: Try sqlglot first
             try:
+                # Pre-process SQL to handle common issues
+                cleaned_sql = self._preprocess_sql(hive_sql)
+                
                 # Parse and transform using sqlglot
-                expressions = parse(hive_sql, read='hive')
+                expressions = parse(cleaned_sql, read='hive', error_level='IGNORE')
                 converted = []
                 
                 for expr in expressions:
-                    # Transform using sqlglot's built-in conversion
-                    snowflake_sql = expr.sql(dialect='snowflake')
-                    converted.append(snowflake_sql)
+                    try:
+                        # Transform using sqlglot's built-in conversion
+                        snowflake_sql = expr.sql(dialect='snowflake')
+                        converted.append(snowflake_sql)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to convert expression: {str(e)}")
+                        # Fall back to original SQL for this expression
+                        converted.append(str(expr))
                 
                 result = ';\n\n'.join(converted)
                 self.logger.debug("sqlglot conversion completed")
@@ -46,6 +55,44 @@ class HiveToSnowflakeConverter:
         except Exception as e:
             self.logger.error(f"Conversion error: {str(e)}")
             raise ConversionError(f"Failed to convert query: {str(e)}")
+
+    def _preprocess_sql(self, sql: str) -> str:
+        """Pre-process SQL to handle common parsing issues"""
+        # Remove UTF-8 BOM if present
+        sql = sql.replace('\ufeff', '')
+        
+        # Normalize line endings
+        sql = sql.replace('\r\n', '\n')
+        
+        # Fix common syntax issues that cause parsing errors
+        fixes = [
+            # Fix missing spaces around operators
+            (r'([a-zA-Z0-9_])(=|<|>|<=|>=|!=)([a-zA-Z0-9_])', r'\1 \2 \3'),
+            
+            # Fix missing spaces after commas
+            (r',([^\s])', r', \1'),
+            
+            # Fix multiple spaces
+            (r'\s+', ' '),
+            
+            # Fix spaces around parentheses
+            (r'\(\s+', '('),
+            (r'\s+\)', ')'),
+            
+            # Fix common comment issues
+            (r'--([^\n])', r'-- \1'),
+            
+            # Fix missing semicolons between statements
+            (r';\s*([A-Za-z])', r';\n\1'),
+            
+            # Handle special characters in strings
+            (r"'([^']*)'", lambda m: f"'{m.group(1).replace(';', '\\;')}'")
+        ]
+        
+        for pattern, replacement in fixes:
+            sql = re.sub(pattern, replacement, sql)
+        
+        return sql.strip()
 
     def _format_sql(self, sql: str) -> str:
         """Format SQL for better readability"""
@@ -202,98 +249,17 @@ class HiveToSnowflakeConverter:
     
     def _apply_custom_transformations(self, sql: str) -> str:
         """Apply custom transformations for unsupported features"""
-        # Remove Hive commands and hints
+        # First convert table names
+        sql = self._convert_table_references(sql)
+        
+        # Then apply other transformations
         sql = self._remove_hive_commands(sql)
-        
-        # Convert DML statements
         sql = self._convert_dml_statements(sql)
-        
-        # Convert DDL statements
         sql = self._convert_ddl_statements(sql)
-        
-        # Convert CREATE TABLE statements
-        sql = re.sub(
-            r'CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)',
-            r'CREATE OR REPLACE TABLE \1',
-            sql,
-            flags=re.IGNORECASE
-        )
-        
-        # Remove partitioning and clustering
-        sql = re.sub(r'\s*PARTITIONED\s+BY\s*\([^)]+\)', '', sql, flags=re.IGNORECASE)
-        sql = re.sub(r'\s*CLUSTERED\s+BY\s*\([^)]+\)\s+INTO\s+\d+\s+BUCKETS', '', sql, flags=re.IGNORECASE)
-        
-        # Convert Hive functions
         sql = self._convert_functions(sql)
         
-        # Convert JSON operations
-        sql = self._convert_json_operations(sql)
-        
-        # Remove storage format
-        sql = re.sub(r'\s*STORED\s+AS\s+\w+', '', sql, flags=re.IGNORECASE)
-        
-        # Convert session time difference calculation
-        sql = re.sub(
-            r'STR_TO_UNIX\(([^,]+),\s*[\'"][^\'"]+[\'"]\)\s*-\s*STR_TO_UNIX\(([^,]+),\s*[\'"][^\'"]+[\'"]\)\s*>\s*1800',
-            r'DATEDIFF(SECOND, \2, \1) > 1800',
-            sql,
-            flags=re.IGNORECASE
-        )
-        
         return sql
-    
-    def _remove_hive_commands(self, sql: str) -> str:
-        """Remove Hive-specific commands and hints"""
-        # Remove all SET commands
-        sql = re.sub(
-            r'SET\s+[\w\.]+\s*=\s*[^;]+;',
-            '',
-            sql,
-            flags=re.IGNORECASE
-        )
-        
-        # Remove specific Hive SET commands
-        hive_settings = [
-            'hive.exec.parallel',
-            'hive.auto.convert.join',
-            'hive.optimize.skewjoin',
-            'hive.skewjoin.key',
-            'hive.exec.dynamic.partition',
-            'hive.exec.dynamic.partition.mode',
-            'mapred.reduce.tasks',
-            'hive.merge.mapfiles',
-            'hive.merge.mapredfiles'
-        ]
-        
-        for setting in hive_settings:
-            sql = re.sub(
-                f'SET\s+{setting}\s*=\s*[^;]+;',
-                '',
-                sql,
-                flags=re.IGNORECASE
-            )
-        
-        # Remove Hive hints and comments
-        hint_patterns = [
-            r'/\*\+[^*]*\*/',  # Optimizer hints
-            r'--\s*MAPJOIN\([^)]*\)',  # MapJoin hints
-            r'--\s*STREAMTABLE\([^)]*\)',  # StreamTable hints
-            r'/\*\s*hive\.[^*]*\*/',  # Hive-specific comments
-            r'--\s*set\s+hive\.[^;\n]*',  # Hive settings in comments
-            r'--\s*distribute\s+by[^;\n]*',  # Distribution hints
-            r'--\s*cluster\s+by[^;\n]*',  # Clustering hints
-            r'--\s*sort\s+by[^;\n]*'  # Sorting hints
-        ]
-        
-        for pattern in hint_patterns:
-            sql = re.sub(pattern, '', sql, flags=re.IGNORECASE)
-        
-        # Remove empty lines and extra whitespace
-        sql = re.sub(r'\n\s*\n', '\n\n', sql)
-        sql = re.sub(r';\s*;', ';', sql)
-        
-        return sql.strip()
-    
+
     def _convert_functions(self, sql: str) -> str:
         """Convert Hive functions to Snowflake equivalents"""
         # Timestamp/Unix conversions
@@ -534,4 +500,172 @@ class HiveToSnowflakeConverter:
         for clause in storage_clauses:
             sql = re.sub(clause, '', sql, flags=re.IGNORECASE)
         
-        return sql 
+        return sql
+
+    def _convert_create_table(self, match: re.Match) -> str:
+        """Convert CREATE TABLE statement using mappings if available"""
+        full_match = match.group(0)
+        table_name = match.group(1)
+        
+        # Try to get table info from mappings
+        table_info = get_table_info(table_name)
+        if not table_info:
+            # If no mapping found, convert the original statement
+            return self._convert_unmapped_table(full_match)
+        
+        # Generate CREATE TABLE with mapped columns
+        columns = [f"{col.name} {col.snow_type}" for col in table_info.columns]
+        
+        # Add partition columns if any
+        if table_info.partition_columns:
+            partition_cols = [f"{col.name} {col.snow_type}" 
+                            for col in table_info.partition_columns]
+            columns.extend(partition_cols)
+        
+        create_stmt = f"""CREATE OR REPLACE TABLE {table_info.name} (
+    {',\n    '.join(columns)}
+)"""
+        
+        return create_stmt
+
+    def _convert_unmapped_table(self, create_stmt: str) -> str:
+        """Convert CREATE TABLE statement without mappings"""
+        # Remove EXTERNAL and IF NOT EXISTS
+        stmt = re.sub(
+            r'CREATE\s+(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)',
+            r'CREATE OR REPLACE TABLE \1',
+            create_stmt,
+            flags=re.IGNORECASE
+        )
+        
+        # Convert data types
+        def convert_type(match: re.Match) -> str:
+            hive_type = match.group(0)
+            return get_snowflake_type(hive_type)
+        
+        # Find and convert column definitions
+        def convert_columns(match: re.Match) -> str:
+            cols = match.group(1)
+            # Convert each column's data type
+            converted = re.sub(r'\b[A-Z_]+(?:\([^)]+\))?\b', convert_type, cols)
+            return f"({converted})"
+        
+        stmt = re.sub(r'\((.*?)\)', convert_columns, stmt, flags=re.DOTALL)
+        
+        # Remove Hive-specific clauses
+        stmt = self._remove_hive_clauses(stmt)
+        
+        return stmt
+
+    def _remove_hive_clauses(self, sql: str) -> str:
+        """Remove Hive-specific clauses from CREATE TABLE"""
+        clauses = [
+            r'\s*STORED\s+AS\s+\w+',
+            r'\s*LOCATION\s+\'[^\']+\'',
+            r'\s*ROW\s+FORMAT\s+DELIMITED',
+            r'\s*FIELDS\s+TERMINATED\s+BY\s+\'[^\']+\'',
+            r'\s*LINES\s+TERMINATED\s+BY\s+\'[^\']+\'',
+            r'\s*STORED\s+BY\s+\'[^\']+\'',
+            r'\s*WITH\s+SERDEPROPERTIES\s*\([^)]+\)',
+            r'\s*TBLPROPERTIES\s*\([^)]+\)',
+            r'\s*FORMAT\s*=\s*\w+'
+        ]
+        
+        # Keep track of parentheses
+        parts = sql.split(')')
+        if len(parts) > 1:
+            # Process everything before the last ')'
+            main_part = ')'.join(parts[:-1]) + ')'
+            # Keep any trailing content after the last ')'
+            trailing = parts[-1]
+            
+            # Remove Hive clauses only from the trailing part
+            for clause in clauses:
+                trailing = re.sub(f'{clause}.*?(?:;|$)', '', trailing, flags=re.IGNORECASE)
+            
+            sql = main_part + trailing
+        
+        return sql.strip()
+
+    def _convert_table_references(self, sql: str) -> str:
+        """Convert table names from Hive to Snowflake"""
+        # Find and replace table names in different contexts
+        patterns = [
+            # CREATE TABLE statements
+            (r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\${hivevar:\w+}_\w+|\w+)',
+             lambda m: f"CREATE OR REPLACE TABLE {get_snowflake_table_name(m.group(1))}"),
+            
+            # FROM clauses
+            (r'FROM\s+(\${hivevar:\w+}_\w+|\w+)\b',
+             lambda m: f"FROM {get_snowflake_table_name(m.group(1))}"),
+            
+            # JOIN clauses
+            (r'JOIN\s+(\${hivevar:\w+}_\w+|\w+)\b',
+             lambda m: f"JOIN {get_snowflake_table_name(m.group(1))}"),
+            
+            # INSERT statements
+            (r'INSERT\s+(?:INTO|OVERWRITE)\s+(?:TABLE\s+)?(\${hivevar:\w+}_\w+|\w+)',
+             lambda m: f"INSERT INTO {get_snowflake_table_name(m.group(1))}"),
+            
+            # TRUNCATE statements
+            (r'TRUNCATE\s+TABLE\s+(\${hivevar:\w+}_\w+|\w+)',
+             lambda m: f"TRUNCATE TABLE {get_snowflake_table_name(m.group(1))}")
+        ]
+        
+        # Apply each pattern
+        for pattern, replacement in patterns:
+            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+        
+        return sql
+
+    def _remove_hive_commands(self, sql: str) -> str:
+        """Remove Hive-specific commands and hints"""
+        # Remove all SET commands
+        sql = re.sub(
+            r'SET\s+[\w\.]+\s*=\s*[^;]+;',
+            '',
+            sql,
+            flags=re.IGNORECASE
+        )
+        
+        # Remove specific Hive SET commands
+        hive_settings = [
+            'hive.exec.parallel',
+            'hive.auto.convert.join',
+            'hive.optimize.skewjoin',
+            'hive.skewjoin.key',
+            'hive.exec.dynamic.partition',
+            'hive.exec.dynamic.partition.mode',
+            'mapred.reduce.tasks',
+            'hive.merge.mapfiles',
+            'hive.merge.mapredfiles'
+        ]
+        
+        for setting in hive_settings:
+            sql = re.sub(
+                f'SET\s+{setting}\s*=\s*[^;]+;',
+                '',
+                sql,
+                flags=re.IGNORECASE
+            )
+        
+        # Remove Hive hints and comments
+        hint_patterns = [
+            r'/\*\+[^*]*\*/',  # Optimizer hints
+            r'--\s*MAPJOIN\([^)]*\)',  # MapJoin hints
+            r'--\s*STREAMTABLE\([^)]*\)',  # StreamTable hints
+            r'/\*\s*hive\.[^*]*\*/',  # Hive-specific comments
+            r'--\s*set\s+hive\.[^;\n]*',  # Hive settings in comments
+            r'--\s*distribute\s+by[^;\n]*',  # Distribution hints
+            r'--\s*cluster\s+by[^;\n]*',  # Clustering hints
+            r'--\s*sort\s+by[^;\n]*'  # Sorting hints
+        ]
+        
+        for pattern in hint_patterns:
+            sql = re.sub(pattern, '', sql, flags=re.IGNORECASE)
+        
+        # Remove empty lines and extra whitespace
+        sql = re.sub(r'\n\s*\n', '\n\n', sql)
+        sql = re.sub(r';\s*;', ';', sql)
+        
+        return sql.strip() 
