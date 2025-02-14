@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 import re
 import snowflake.connector
 from snowflake.connector.errors import ProgrammingError
+import os
 
 class SQLFileProcessor:
     def __init__(self, snowflake_config: Dict):
@@ -16,17 +17,31 @@ class SQLFileProcessor:
         self.variables = {}  # Store variable values
         
     def connect_to_snowflake(self):
-        """Establish Snowflake connection"""
+        """Establish Snowflake connection with proxy URL"""
         try:
-            self.conn = snowflake.connector.connect(
-                user=self.snowflake_config['user'],
-                password=self.snowflake_config['password'],
-                account=self.snowflake_config['account'],
-                warehouse=self.snowflake_config['warehouse'],
-                database=self.snowflake_config['database'],
-                schema=self.snowflake_config['schema']
-            )
-            return True
+            # Set proxy URL in environment variables
+            proxy_url = self.snowflake_config.get('proxy_url')
+            if proxy_url:
+                # Set proxy for HTTPS connections
+                os.environ['https_proxy'] = proxy_url
+                os.environ['HTTPS_PROXY'] = proxy_url  # Some applications check uppercase
+                # Set proxy for HTTP connections
+                os.environ['http_proxy'] = proxy_url
+                os.environ['HTTP_PROXY'] = proxy_url
+                
+                self.logger.info(f"Set proxy environment variables to: {proxy_url}")
+                
+                self.conn = snowflake.connector.connect(
+                    user=self.snowflake_config['user'],
+                    password=self.snowflake_config['password'],
+                    account=self.snowflake_config['account'],
+                    warehouse=self.snowflake_config['warehouse'],
+                    database=self.snowflake_config['database'],
+                    schema=self.snowflake_config['schema']
+                )
+                self.logger.info(f"Successfully connected to Snowflake via proxy: {proxy_url}")
+                return True
+        
         except Exception as e:
             self.logger.error(f"Failed to connect to Snowflake: {e}")
             return False
@@ -438,7 +453,8 @@ def main():
         'account': 'YOUR_ACCOUNT',
         'warehouse': 'YOUR_WAREHOUSE',
         'database': 'YOUR_DATABASE',
-        'schema': 'YOUR_SCHEMA'
+        'schema': 'YOUR_SCHEMA',
+        'proxy_url': 'http://proxy-url:port'  # Add your proxy URL here
     }
     
     try:
