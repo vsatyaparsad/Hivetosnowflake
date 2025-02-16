@@ -294,33 +294,51 @@ class SQLFileProcessor:
         return "\n".join(context)
 
 def create_excel_report(results: Dict[str, Dict], output_file: str = "sql_analysis_report.xlsx"):
-    """Create detailed Excel report"""
+    """Create detailed Excel report with statement-level results"""
+    # Prepare data for Excel with statement-level details
     report_data = []
     
     for file_name, result in results.items():
-        status = result.get("status", "unknown")
-        error_msg = result.get("error", "") if status == "error" else ""
-        num_statements = result.get("statements", 0) if status == "success" else 0
-        variables = len(result.get("variables", {})) if status == "success" else 0
-        
-        report_data.append({
-            "File Name": file_name,
-            "Status": status.upper(),
-            "Number of Statements": num_statements,
-            "Number of Variables": variables,
-            "Error Message": error_msg,
-            "Processing Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+        if result["status"] == "success":
+            execution_results = result.get("execution_results", [])
+            
+            # Add each statement as a separate row
+            for stmt_result in execution_results:
+                if stmt_result["type"] == "statement":  # Only process SQL statements, not variable declarations
+                    status = stmt_result["status"]
+                    error_msg = stmt_result.get("error", "") if status == "error" else ""
+                    
+                    report_data.append({
+                        "File Name": file_name,
+                        "SQL Statement": stmt_result.get("statement", "")[:1000],  # Limit statement length
+                        "Status": status.upper(),
+                        "Rows Affected": stmt_result.get("rows_affected", 0) if status == "success" else 0,
+                        "Error Message": error_msg,
+                        "Processing Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        else:
+            # Add file-level error
+            report_data.append({
+                "File Name": file_name,
+                "SQL Statement": "FILE LEVEL ERROR",
+                "Status": "ERROR",
+                "Rows Affected": 0,
+                "Error Message": result.get("error", "Unknown error"),
+                "Processing Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
     
+    # Create DataFrame
     df = pd.DataFrame(report_data)
     
+    # Create Excel writer with formatting
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='SQL Analysis Results', index=False)
+        df.to_excel(writer, sheet_name='SQL Results', index=False)
         
+        # Get workbook and worksheet
         workbook = writer.book
-        worksheet = writer.sheets['SQL Analysis Results']
+        worksheet = writer.sheets['SQL Results']
         
-        # Formats
+        # Define formats
         header_format = workbook.add_format({
             'bold': True,
             'bg_color': '#D3D3D3',
@@ -328,31 +346,67 @@ def create_excel_report(results: Dict[str, Dict], output_file: str = "sql_analys
         })
         
         success_format = workbook.add_format({
-            'bg_color': '#90EE90'
+            'bg_color': '#90EE90'  # Light green
         })
         
         error_format = workbook.add_format({
-            'bg_color': '#FFB6C1'
+            'bg_color': '#FFB6C1'  # Light red
+        })
+        
+        wrap_format = workbook.add_format({
+            'text_wrap': True,
+            'valign': 'top'
         })
         
         # Apply formats
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
         
-        # Column widths
-        worksheet.set_column('A:A', 40)  # File Name
-        worksheet.set_column('B:B', 15)  # Status
-        worksheet.set_column('C:D', 20)  # Numbers
-        worksheet.set_column('E:E', 50)  # Error Message
+        # Set column widths and formats
+        worksheet.set_column('A:A', 30)  # File Name
+        worksheet.set_column('B:B', 60, wrap_format)  # SQL Statement
+        worksheet.set_column('C:C', 15)  # Status
+        worksheet.set_column('D:D', 15)  # Rows Affected
+        worksheet.set_column('E:E', 50, wrap_format)  # Error Message
         worksheet.set_column('F:F', 20)  # Processing Time
         
-        # Row formatting
+        # Apply conditional formatting
         for row_num in range(1, len(df) + 1):
             status = df.iloc[row_num-1]['Status']
             if status == 'SUCCESS':
                 worksheet.set_row(row_num, None, success_format)
             elif status == 'ERROR':
                 worksheet.set_row(row_num, None, error_format)
+        
+        # Add summary worksheet
+        summary_data = []
+        for file_name in set(df['File Name']):
+            file_df = df[df['File Name'] == file_name]
+            total_statements = len(file_df)
+            successful = len(file_df[file_df['Status'] == 'SUCCESS'])
+            failed = len(file_df[file_df['Status'] == 'ERROR'])
+            
+            summary_data.append({
+                'File Name': file_name,
+                'Total Statements': total_statements,
+                'Successful': successful,
+                'Failed': failed,
+                'Success Rate': f"{(successful/total_statements)*100:.1f}%"
+            })
+        
+        # Create summary sheet
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # Format summary sheet
+        summary_sheet = writer.sheets['Summary']
+        summary_sheet.set_column('A:A', 30)
+        summary_sheet.set_column('B:D', 15)
+        summary_sheet.set_column('E:E', 15)
+        
+        # Apply header format to summary sheet
+        for col_num, value in enumerate(summary_df.columns.values):
+            summary_sheet.write(0, col_num, value, header_format)
 
 def create_detailed_error_report(results: Dict[str, Dict], output_file: str = "error_report.txt"):
     """Create detailed error report with SQL context"""
