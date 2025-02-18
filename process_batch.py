@@ -330,83 +330,90 @@ def create_excel_report(results: Dict[str, Dict], output_file: str = "sql_analys
     # Create DataFrame
     df = pd.DataFrame(report_data)
     
-    # Create Excel writer with formatting
-    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='SQL Results', index=False)
-        
-        # Get workbook and worksheet
-        workbook = writer.book
-        worksheet = writer.sheets['SQL Results']
-        
-        # Define formats
-        header_format = workbook.add_format({
-            'bold': True,
-            'bg_color': '#D3D3D3',
-            'border': 1
-        })
-        
-        success_format = workbook.add_format({
-            'bg_color': '#90EE90'  # Light green
-        })
-        
-        error_format = workbook.add_format({
-            'bg_color': '#FFB6C1'  # Light red
-        })
-        
-        wrap_format = workbook.add_format({
-            'text_wrap': True,
-            'valign': 'top'
-        })
-        
-        # Apply formats
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-        
-        # Set column widths and formats
-        worksheet.set_column('A:A', 30)  # File Name
-        worksheet.set_column('B:B', 60, wrap_format)  # SQL Statement
-        worksheet.set_column('C:C', 15)  # Status
-        worksheet.set_column('D:D', 15)  # Rows Affected
-        worksheet.set_column('E:E', 50, wrap_format)  # Error Message
-        worksheet.set_column('F:F', 20)  # Processing Time
-        
-        # Apply conditional formatting
-        for row_num in range(1, len(df) + 1):
-            status = df.iloc[row_num-1]['Status']
-            if status == 'SUCCESS':
-                worksheet.set_row(row_num, None, success_format)
-            elif status == 'ERROR':
-                worksheet.set_row(row_num, None, error_format)
-        
-        # Add summary worksheet
-        summary_data = []
-        for file_name in set(df['File Name']):
-            file_df = df[df['File Name'] == file_name]
-            total_statements = len(file_df)
-            successful = len(file_df[file_df['Status'] == 'SUCCESS'])
-            failed = len(file_df[file_df['Status'] == 'ERROR'])
+    try:
+        # Create Excel writer with formatting
+        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='SQL Results', index=False)
             
-            summary_data.append({
-                'File Name': file_name,
-                'Total Statements': total_statements,
-                'Successful': successful,
-                'Failed': failed,
-                'Success Rate': f"{(successful/total_statements)*100:.1f}%"
+            # Get workbook and worksheet
+            workbook = writer.book
+            worksheet = writer.sheets['SQL Results']
+            
+            # Define formats
+            header_format = workbook.add_format({
+                'bold': True,
+                'bg_color': '#D3D3D3',
+                'border': 1
             })
-        
-        # Create summary sheet
-        summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Summary', index=False)
-        
-        # Format summary sheet
-        summary_sheet = writer.sheets['Summary']
-        summary_sheet.set_column('A:A', 30)
-        summary_sheet.set_column('B:D', 15)
-        summary_sheet.set_column('E:E', 15)
-        
-        # Apply header format to summary sheet
-        for col_num, value in enumerate(summary_df.columns.values):
-            summary_sheet.write(0, col_num, value, header_format)
+            
+            success_format = workbook.add_format({
+                'bg_color': '#90EE90'  # Light green
+            })
+            
+            error_format = workbook.add_format({
+                'bg_color': '#FFB6C1'  # Light red
+            })
+            
+            wrap_format = workbook.add_format({
+                'text_wrap': True,
+                'valign': 'top'
+            })
+            
+            # Apply formats
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            
+            # Set column widths and formats
+            worksheet.set_column('A:A', 30)  # File Name
+            worksheet.set_column('B:B', 60, wrap_format)  # SQL Statement
+            worksheet.set_column('C:C', 15)  # Status
+            worksheet.set_column('D:D', 15)  # Rows Affected
+            worksheet.set_column('E:E', 50, wrap_format)  # Error Message
+            worksheet.set_column('F:F', 20)  # Processing Time
+            
+            # Apply conditional formatting
+            for row_num in range(1, len(df) + 1):
+                status = df.iloc[row_num-1]['Status']
+                if status == 'SUCCESS':
+                    worksheet.set_row(row_num, None, success_format)
+                elif status == 'ERROR':
+                    worksheet.set_row(row_num, None, error_format)
+            
+            # Add summary worksheet
+            summary_data = []
+            for file_name in set(df['File Name']):
+                file_df = df[df['File Name'] == file_name]
+                total_statements = len(file_df)
+                successful = len(file_df[file_df['Status'] == 'SUCCESS'])
+                failed = len(file_df[file_df['Status'] == 'ERROR'])
+                
+                summary_data.append({
+                    'File Name': file_name,
+                    'Total Statements': total_statements,
+                    'Successful': successful,
+                    'Failed': failed,
+                    'Success Rate': f"{(successful/total_statements)*100:.1f}%"
+                })
+            
+            # Create summary sheet
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Format summary sheet
+            summary_sheet = writer.sheets['Summary']
+            summary_sheet.set_column('A:A', 30)
+            summary_sheet.set_column('B:D', 15)
+            summary_sheet.set_column('E:E', 15)
+            
+            # Apply header format to summary sheet
+            for col_num, value in enumerate(summary_df.columns.values):
+                summary_sheet.write(0, col_num, value, header_format)
+                
+    except Exception as e:
+        logging.error(f"Failed to create Excel report: {str(e)}")
+        # Save as CSV instead
+        df.to_csv(output_file.replace('.xlsx', '.csv'), index=False)
+        logging.info(f"Saved report as CSV instead: {output_file.replace('.xlsx', '.csv')}")
 
 def create_detailed_error_report(results: Dict[str, Dict], output_file: str = "error_report.txt"):
     """Create detailed error report with SQL context"""
@@ -587,7 +594,15 @@ def main():
             processor.conn.close()
         
         # Generate reports with execution results
-        create_excel_report(results)
+        try:
+            create_excel_report(results)
+            logger.info("Excel report generated successfully")
+        except Exception as e:
+            logger.error(f"Failed to create Excel report: {e}")
+            # Save results as JSON if Excel fails
+            with open("sql_analysis_report.json", "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info("Results saved as JSON instead")
         
         # Save detailed JSON report
         report = {
