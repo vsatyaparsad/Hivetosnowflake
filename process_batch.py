@@ -182,13 +182,55 @@ class SQLFileProcessor:
         return stmt.startswith('SET') and '=' in stmt
 
     def _split_statements(self, sql: str) -> List[str]:
-        """Split SQL into individual statements"""
+        """Split SQL into individual statements, ignoring comments"""
         statements = []
         current_stmt = []
         in_quote = False
         quote_char = None
+        in_line_comment = False
+        in_block_comment = False
+        i = 0
         
-        for char in sql:
+        while i < len(sql):
+            char = sql[i]
+            next_char = sql[i + 1] if i + 1 < len(sql) else None
+            
+            # Handle start of line comment
+            if not in_quote and not in_block_comment and char == '-' and next_char == '-':
+                in_line_comment = True
+                i += 2
+                continue
+            
+            # Handle end of line comment
+            if in_line_comment and char == '\n':
+                in_line_comment = False
+                current_stmt.append(char)  # Keep the newline
+                i += 1
+                continue
+            
+            # Skip characters in line comment
+            if in_line_comment:
+                i += 1
+                continue
+            
+            # Handle start of block comment
+            if not in_quote and not in_line_comment and char == '/' and next_char == '*':
+                in_block_comment = True
+                i += 2
+                continue
+            
+            # Handle end of block comment
+            if in_block_comment and char == '*' and next_char == '/':
+                in_block_comment = False
+                i += 2
+                continue
+            
+            # Skip characters in block comment
+            if in_block_comment:
+                i += 1
+                continue
+            
+            # Handle quotes
             if char in ["'", '"']:
                 if not in_quote:
                     in_quote = True
@@ -197,6 +239,7 @@ class SQLFileProcessor:
                     in_quote = False
                     quote_char = None
             
+            # Handle statement termination
             if char == ';' and not in_quote:
                 current_stmt.append(char)
                 stmt = ''.join(current_stmt).strip()
@@ -205,12 +248,15 @@ class SQLFileProcessor:
                 current_stmt = []
             else:
                 current_stmt.append(char)
+            
+            i += 1
         
+        # Handle final statement if any
         final_stmt = ''.join(current_stmt).strip()
         if final_stmt:
             statements.append(final_stmt)
         
-        return statements
+        return [stmt for stmt in statements if stmt.strip()]
 
     def _get_error_line(self, error: Exception) -> Optional[int]:
         """Extract line number from error message"""
