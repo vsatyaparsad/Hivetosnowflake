@@ -141,12 +141,23 @@ class SQLFileProcessor:
         if stmt.endswith(';'):
             stmt = stmt[:-1]
         
+        # Check if it's a session variable
+        is_session = 'session.' in stmt.lower()
+        
         parts = stmt.split('=', 1)
         if len(parts) != 2:
             raise ValueError("Invalid variable declaration")
         
-        var_name = parts[0].replace('SET', '').strip()
+        var_part = parts[0].replace('SET', '').strip()
         var_query = parts[1].strip()
+        
+        # Handle session variables
+        if is_session:
+            # Keep the full variable name including 'session.'
+            var_name = var_part
+        else:
+            # For regular variables, just get the name part
+            var_name = var_part.split('.')[-1].strip()
         
         # Remove outer parentheses if present
         if var_query.startswith('(') and var_query.endswith(')'):
@@ -158,12 +169,13 @@ class SQLFileProcessor:
         """Replace variables in SQL statement with their values"""
         processed_stmt = stmt
         for var_name, var_value in self.variables.items():
-            # Handle different variable syntaxes
+            # Handle different variable syntaxes including session variables
             patterns = [
                 f"${var_name}",
                 f"${{var_name}}",
                 f":{var_name}",
-                f"@{var_name}"
+                f"@{var_name}",
+                var_name  # For session variables, use the full name
             ]
             
             for pattern in patterns:
@@ -179,7 +191,7 @@ class SQLFileProcessor:
     def _is_variable_declaration(self, stmt: str) -> bool:
         """Check if statement is a variable declaration"""
         stmt = stmt.strip().upper()
-        return stmt.startswith('SET') and '=' in stmt
+        return stmt.startswith('SET') and ('=' in stmt or 'TO' in stmt)
 
     def _split_statements(self, sql: str) -> List[str]:
         """Split SQL into individual statements, ignoring comments"""
