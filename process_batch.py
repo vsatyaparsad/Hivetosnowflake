@@ -61,17 +61,30 @@ class SQLFileProcessor:
                     if self._is_variable_declaration(stmt):
                         try:
                             var_name, var_query = self._parse_variable_declaration(stmt)
-                            cursor.execute(var_query)
-                            result = cursor.fetchone()
-                            if result:
-                                self.variables[var_name] = result[0]
+                            
+                            # If it's a session variable, execute the SET statement directly
+                            if 'session.' in var_name.lower():
+                                cursor.execute(stmt)  # Execute the original SET statement
                                 execution_results.append({
                                     "type": "variable_declaration",
                                     "status": "success",
                                     "variable": var_name,
-                                    "value": str(result[0]),
+                                    "value": var_query,  # Store the query part as value
                                     "statement": stmt
                                 })
+                            else:
+                                # For regular variables, execute the query and store result
+                                cursor.execute(var_query)
+                                result = cursor.fetchone()
+                                if result:
+                                    self.variables[var_name] = result[0]
+                                    execution_results.append({
+                                        "type": "variable_declaration",
+                                        "status": "success",
+                                        "variable": var_name,
+                                        "value": str(result[0]),
+                                        "statement": stmt
+                                    })
                         except Exception as e:
                             execution_results.append({
                                 "type": "variable_declaration",
