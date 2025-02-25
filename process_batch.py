@@ -62,21 +62,38 @@ class SQLFileProcessor:
                         try:
                             var_name, var_query = self._parse_variable_declaration(stmt)
                             
-                            # If it's a session variable, execute the SET statement directly
-                            if 'session.' in var_name.lower():
-                                cursor.execute(stmt)  # Execute the original SET statement
+                            # For both session and regular variables, execute the SET statement
+                            try:
+                                # First try to execute the original SET statement
+                                cursor.execute(stmt)
+                                
+                                # Now query the value to store locally
+                                if 'session.' in var_name.lower():
+                                    # For session variables, query the value we just set
+                                    var_check_query = f"SELECT ${{var_name}}"
+                                    cursor.execute(var_check_query)
+                                    result = cursor.fetchone()
+                                    if result is not None:
+                                        self.variables[var_name] = result[0]
+                                else:
+                                    # For regular variables, execute the query part
+                                    cursor.execute(var_query)
+                                    result = cursor.fetchone()
+                                    if result is not None:
+                                        self.variables[var_name] = result[0]
+                                
                                 execution_results.append({
                                     "type": "variable_declaration",
                                     "status": "success",
                                     "variable": var_name,
-                                    "value": var_query,  # Store the query part as value
+                                    "value": str(self.variables.get(var_name, '')),
                                     "statement": stmt
                                 })
-                            else:
-                                # For regular variables, execute the query and store result
+                            except Exception as e:
+                                # If SET statement fails, try evaluating the query directly
                                 cursor.execute(var_query)
                                 result = cursor.fetchone()
-                                if result:
+                                if result is not None:
                                     self.variables[var_name] = result[0]
                                     execution_results.append({
                                         "type": "variable_declaration",
@@ -85,6 +102,9 @@ class SQLFileProcessor:
                                         "value": str(result[0]),
                                         "statement": stmt
                                     })
+                                else:
+                                    raise e
+                            
                         except Exception as e:
                             execution_results.append({
                                 "type": "variable_declaration",
